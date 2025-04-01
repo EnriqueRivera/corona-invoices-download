@@ -26,6 +26,7 @@ def fetch_with_retry(session, url, method='GET', retries=5, delay=10, **kwargs):
             response = session.request(method, url, **kwargs)
             if response.status_code == 200:
                 return response
+            
             print(f"Attempt {attempt+1}/{retries} failed with status {response.status_code}")
         except requests.exceptions.RequestException as e:
             print(f"Attempt {attempt+1}/{retries} failed with error: {str(e)}")
@@ -82,7 +83,7 @@ def process_page(session, base_url, query_params, form_params, target_month, tar
         )
     except Exception as e:
         print(f"Page processing failed: {str(e)}")
-        return [], None
+        return [], None, None
 
     soup = BeautifulSoup(response.text, 'html.parser')
     table = soup.find('table', {'id': 'gdHistorico'})
@@ -97,41 +98,33 @@ def process_page(session, base_url, query_params, form_params, target_month, tar
                 try:
                     date_part = cells[3].split()[0]
                     date_obj = datetime.strptime(date_part, '%d/%m/%Y')
+                    oldest_date = date_obj
                     
                     if date_obj.month == target_month and date_obj.year == target_year:
                         records.append({
                             'date': date_obj,
                             'itu': cells[6]
                         })
-                    
-                    if oldest_date is None or date_obj < oldest_date:
-                        oldest_date = date_obj
                         
                 except (ValueError, IndexError, KeyError):
                     continue
 
-    stop_pagination = False
-    if oldest_date:
-        target_date = datetime(target_year, target_month, 1)
-        if oldest_date < target_date:
-            stop_pagination = True
-
     next_link = soup.find('a', {'id': 'NextPageLink'})
     new_form_params = None
 
-    if not stop_pagination and next_link:
-        href = next_link.get('href', '')
-        match = re.search(r"__doPostBack\('([^']+)','([^']*)'\)", href)
-        
-        if match:
-            current_hidden = get_hidden_fields(soup)
-            new_form_params = {
-                **current_hidden,
-                '__EVENTTARGET': match.group(1),
-                '__EVENTARGUMENT': match.group(2)
-            }
+    # Pagination
+    href = next_link.get('href', '')
+    match = re.search(r"__doPostBack\('([^']+)','([^']*)'\)", href)
+    
+    if match:
+        current_hidden = get_hidden_fields(soup)
+        new_form_params = {
+            **current_hidden,
+            '__EVENTTARGET': match.group(1),
+            '__EVENTARGUMENT': match.group(2)
+        }
 
-    return records, new_form_params
+    return records, new_form_params, oldest_date
 
 def merge_and_cleanup(output_dir, all_records, timestamp):
     """Merge downloaded PDFs and clean up individual files"""
@@ -174,7 +167,7 @@ def merge_and_cleanup(output_dir, all_records, timestamp):
 
 def main(rfc, month, year):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = f"Invoices_{timestamp}"
+    output_dir = f"Invoices/Invoices_{timestamp}"
     os.makedirs(output_dir, exist_ok=True)
     
     base_url = "https://www.facturacioncfdigm.modelo.gmodelo.com.mx/ModeloFacturaPRD/Modulos/ClienteInternet/ConsultaCFDHistorico.aspx"
@@ -208,17 +201,17 @@ def main(rfc, month, year):
         
         while True:
             print(f"Processing page {page_num}...")
-            records, new_form_params = process_page(
+            records, new_form_params, oldest_date = process_page(
                 session, base_url, query_params, form_params, month, year
             )
+
+            print(f"Found {len(records)} records")
             
-            if not records and page_num == 1:
-                print("No matching records found on first page")
-                break
-                
             all_records.extend(records)
             
-            if not new_form_params:
+            if new_form_params is None or (
+               oldest_date is None or 
+               (oldest_date.year < year or (oldest_date.year == year and oldest_date.month < month))):
                 break
                 
             form_params = new_form_params
